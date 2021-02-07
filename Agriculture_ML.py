@@ -14,7 +14,6 @@ The recall of the model is 96% and the precision 30%.
 
 """
 
-
 import pandas as pd
 import itertools
 import numpy as np
@@ -26,11 +25,15 @@ from sklearn import metrics
 from sklearn.model_selection import RandomizedSearchCV
 
 
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.compose import ColumnTransformer
+
+
 
 # FUNCTIONS :
 
 def Filter_by_count(df , col_name , threshold):
-    df['Count'] = df.groupby('Importer')['Importer'].transform('count')
+    df['Count'] = df.groupby(col_name)[col_name].transform('count')
     df = df[df['Count'] >= threshold]
     return df.loc[:, df.columns != 'Count']
 
@@ -38,15 +41,15 @@ def risk_profiling(df:pd.DataFrame,
                    feature:str,
                    topk_ratio:float):
    
-    N_top10pct = int(df[feature].nunique()*topk_ratio)+1
+    N_top10pct = int(df[feature].nunique()*topk_ratio) + 1
     RiskH_list = list(df.groupby(feature)['Compliance'].sum().sort_values(ascending=False).head(N_top10pct).index)
    
     return RiskH_list
 
 
-def risk_tagging(df:pd.DataFrame,
-                 feature:str,
-                 RiskH_list:list):
+def risk_tagging( df:pd.DataFrame,
+                  feature:str,
+                  RiskH_list:list ) :
    
     df.loc[:,'RiskH.'+ feature] = np.where(df.loc[:,feature].isin(RiskH_list),1,0)
    
@@ -59,79 +62,89 @@ def get_ratio(df , feature ):
     return df.rename(columns={'ratio': feature + '_ratio'})
 
 
+def Add_ratio(train,test,feature):
+    feature_distinct = feature +'_distinct'
+    feature_distinct = train[[feature,feature+'_ratio']].drop_duplicates()
+    test = pd.merge(test,feature_distinct,left_on= feature, right_on = feature,how = 'left')
+    return test.loc[:, test.columns != feature ]
+
+
 #############################################################################################################
+
 
 df = pd.read_csv(r'C:\Users\stevea\Desktop\Agriculture_model_ML\dataset.csv',header=0,index_col=False,keep_default_na=True,encoding = 'cp1255')
 
-cols = ['Importer', 'Product Name','Product Form', 'Country of origin', 'Supplier', 'Country of import']
+#cols = ['Importer', 'Product Name','Product Form', 'Country of origin', 'Supplier', 'Country of import']
+#for i in cols:
+#    df = Filter_by_count(df , i , 50)
 
-for i in cols:
-    df = Filter_by_count(df , i , 50 )
+print( round((len(df[df['Compliance']==1])/len(df))*100,2) , '%' )
 
-#print( round((len(df[df['Compliance']==1])/len(df))*100,2) , '%' )
 
-#This new feature is useful to check whether there is any collusion :
+# Create correlations variables:
+
 combinations = list(itertools.combinations(['Country of import' , 'Port of entrance' , 'Importer','Product Name'], 2))
 for (cat1, cat2) in combinations:
     ColName = cat1 + '&' + cat2
-    df.loc[:,ColName] = df.loc[:,cat1]+'&'+df.loc[:,cat2]
+    df.loc[:,ColName] = df.loc[: , cat1] + '&' + df.loc[ : , cat2]
 
 
-
-cols = [ 'Importer', 'Port of entrance', 'Product Name',
-         'Product Form', 'Country of origin', 'Supplier','Country of import',
-         'Country of import&Port of entrance','Country of import&Importer',
-         'Country of import&Product Name','Port of entrance&Importer',
-         'Port of entrance&Product Name','Importer&Product Name']
-
-
-'''
-Transform the string variable to numerical variable. The numerical variable is the ratio of 
-fraud on the total for each col of cols.
-For exemple for the Importer the result will be the ratio of fraud for each importer.
-'''
-
-for feature in cols :
-   df =  get_ratio(df,feature )
-   
-
-df = df.dropna()
-
-# Split the data :   
+# Split dataset to train test :
 train = df.iloc[:-1000,:]
-test = df.iloc[-1000:,:]
+test = df.iloc[-1000: , :]
 
+
+# Take the top 10% risk from the categories in features list :
 features = ['Importer' , 'Product Name','Product Form', 'Supplier','Country of import']
-
-'''
-Histories in legal compliance of importers is a good risk indicator. 
-In addition, as machines accept only numbers not classes/categories, risk profiling is a good way 
-of transforming categorical variables to numeric variables.
-'''
 for feature  in features:
     RiskH_list = risk_profiling(df , feature , 0.1)
     train = risk_tagging(train, feature ,RiskH_list)
     test = risk_tagging(test, feature, RiskH_list)
 
 
-# Construct the model :
-    
-column_to_use = [col for col in train.columns if 'ratio' in col]
+
+cols = [ 'Importer', 'Port of entrance', 'Product Name',
+         'Product Form', 'Supplier','Country of import',
+         'Country of import&Port of entrance','Country of import&Importer',
+         'Country of import&Product Name','Port of entrance&Importer',
+         'Port of entrance&Product Name','Importer&Product Name' ]
+
+# Get the ratio of Fraud for the cols variables :
+for feature in cols :
+   train =  get_ratio(train,feature)
+   
+# Assgign the ratio to the test set :
+for feature in cols :
+     test = Add_ratio(train,test,feature)
+
+
+# Select the columns to the model :
+column_to_use = [col for col in train.columns if (('ratio' in col) or ('RiskH' in col)) ]
+
+#cols = ['Importer', 'Product Name','Product Form', 'Country of origin', 'Supplier', 'Country of import']
+#for i in cols:
+#    df = Filter_by_count(df , i , 20 )
+
+
 # Before removing 'fraud' variables, Create Fraud labels
 train_fraud = train.Compliance
 test_fraud = test.Compliance
 
-# Select columns to use in a classifier
 train = train[column_to_use]
 test = test[column_to_use]
 
+# Select columns to use in a classifier
+for i in train.columns:
+    train[i] = train[i].fillna(train[i].mean())
+for i in test.columns:
+    test[i] = test[i].fillna(test[i].mean())
+   
 
+# Select the best parameters for the model :
 countOfOnes = len(df [df['Compliance'] == 1])
 countOfZeros = len(df [df['Compliance'] == 0])
 weightOfOnes= int(round((countOfZeros/countOfOnes),0))
 class_weight = {0: 1. ,  1: weightOfOnes}
-
-# Get the best parameters :
 
 param = {'max_depth': [2,3,4,5,6,7,8,9],
          'max_features': ['auto', 'sqrt'],
@@ -139,17 +152,22 @@ param = {'max_depth': [2,3,4,5,6,7,8,9],
           'class_weight' : [class_weight , 'balanced' ]
           }
 
-rnd_search = RandomizedSearchCV(DecisionTreeClassifier(), param , cv=5,scoring = 'precision')
+rnd_search = RandomizedSearchCV(DecisionTreeClassifier(), param , cv = 6 ,scoring = 'precision')
+
 rnd_search.fit(train,train_fraud)
 rnd_search.best_params_
 rnd_search.best_score_
 
-DT_cl = DecisionTreeClassifier(max_depth = 8, min_samples_split = 125 ,max_features = 'sqrt',class_weight = 'balanced')
+
+# Create the model :
+DT_cl = DecisionTreeClassifier(max_depth = 6, min_samples_split = 80 ,max_features = 'auto',class_weight = 'balanced')
 DT_cl.fit(train,train_fraud)
 pred = DT_cl.predict(test)
 print(metrics.classification_report(test_fraud, pred, digits=3))
 confusion_matrix(test_fraud, pred)
 
+
+# Plot the tree :
 fig, ax = plt.subplots(figsize=(100, 20))
 tree.plot_tree(DT_cl,
                feature_names = train.columns,
@@ -157,4 +175,9 @@ tree.plot_tree(DT_cl,
                fontsize=10)
 
 
-#df.to_csv(r'C:\Users\stevea\Desktop\Agriculture_model_ML\After_preprocess.csv',encoding = 'cp1255')
+
+# Features importance :
+print(DT_cl.feature_importances_)
+feat_importances = pd.Series(DT_cl.feature_importances_, index=train.columns)
+feat_importances.nlargest(20).plot(kind='barh')
+plt.show()
