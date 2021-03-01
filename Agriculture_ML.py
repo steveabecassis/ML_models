@@ -12,6 +12,8 @@ In order to respond to this request i creat a Decision tree and i plot it.
 I build the model on the years from 2010 to 2019 and i test it on 2020.
 The recall of the model is 96% and the precision 30%.
 
+
+
 """
 
 import pandas as pd
